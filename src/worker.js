@@ -3,7 +3,7 @@
 // 加密：暂未启用，但接缝在服务端，密钥用 Secret（用户无需输入任何口令）。
 //
 // 绑定 / 机密：
-//   D1 绑定名：DB
+//   D1 绑定名：NOTE_DB
 //   Secret：AUTH_PASSWORD    登录密码
 //   Secret：SESSION_SECRET   会话签名密钥（随机长串）
 //   Secret：ENC_KEY          （以后启用加密时再加；现在不需要）
@@ -108,6 +108,7 @@ async function handleLogin(request, env) {
 
   const body = await request.json().catch(() => ({}));
   const pw = typeof body.password === 'string' ? body.password : '';
+  if (pw.length > 128) return json({ error: 'password_too_long' }, 400);
   const ok = !!env.AUTH_PASSWORD && timingSafeEqual(pw, env.AUTH_PASSWORD);
 
   if (ok) {
