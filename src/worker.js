@@ -108,6 +108,7 @@ async function handleLogin(request, env) {
 
   const body = await request.json().catch(() => ({}));
   const pw = typeof body.password === 'string' ? body.password : '';
+  if (pw.length > 128) return json({ error: 'password_too_long' }, 400);
   const ok = !!env.AUTH_PASSWORD && timingSafeEqual(pw, env.AUTH_PASSWORD);
 
   if (ok) {
