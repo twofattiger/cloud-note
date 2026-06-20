@@ -3,7 +3,7 @@
 // 加密：暂未启用，但接缝在服务端，密钥用 Secret（用户无需输入任何口令）。
 //
 // 绑定 / 机密：
-//   D1 绑定名：DB
+//   D1 绑定名：NOTE_DB
 //   Secret：AUTH_PASSWORD    登录密码
 //   Secret：SESSION_SECRET   会话签名密钥（随机长串）
 //   Secret：ENC_KEY          （以后启用加密时再加；现在不需要）
@@ -173,9 +173,23 @@ async function handleApi(request, env, url) {
 
   if (p === '/api/notes') {
     if (method === 'GET') {
-      const r = await db.prepare(
-        'SELECT id, title, format, updated_at FROM notes ORDER BY updated_at DESC').all();
-      const rows = r.results || [], out = [];
+      const q = url.searchParams.get('q') || '';
+      let rows;
+      if (q) {
+        const r = await db.prepare(
+          'SELECT id, title, content, format, updated_at FROM notes ORDER BY updated_at DESC').all();
+        rows = (r.results || []).filter(row => {
+          const t = row.title || '';
+          const c = row.format ? '' : (row.content || '');
+          const lq = q.toLowerCase();
+          return t.toLowerCase().includes(lq) || c.toLowerCase().includes(lq);
+        });
+      } else {
+        const r = await db.prepare(
+          'SELECT id, title, format, updated_at FROM notes ORDER BY updated_at DESC').all();
+        rows = r.results || [];
+      }
+      const out = [];
       for (const row of rows) {
         out.push({ id: row.id, title: await decStore(env, row.title, row.format), updated_at: row.updated_at });
       }
@@ -438,9 +452,18 @@ const PAGE = `<!doctype html>
     }).catch(function(){});
   }
   function renderList(){
-    var list=$('list'); list.innerHTML='';
-    var q=query.trim().toLowerCase();
-    var shown=notes.filter(function(n){ return !q||(n.titlePlain||'').toLowerCase().indexOf(q)>=0; });
+    var list=$('list');
+    var q=query.trim();
+    if (q) {
+      api('/api/notes?q='+encodeURIComponent(q)).then(function(data){
+        var shown=(data||[]).map(function(n){ n.titlePlain=n.title||''; return n; });
+        renderListItems(list, shown, q);
+      });
+    } else {
+      renderListItems(list, notes, '');
+    }
+  }
+  function renderListItems(list, shown, q){
     if (!shown.length){
       var e=document.createElement('div'); e.className='empty-list';
       e.textContent=q?'没有匹配的备忘':'还没有备忘，点右上角 + 新建';
