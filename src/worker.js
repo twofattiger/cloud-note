@@ -514,6 +514,51 @@ const PAGE = `<!doctype html>
   function escapeHtml(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
+  // ---- Rich Text Helpers ----
+  var savedRange = null;
+  function saveSel(){ var s=window.getSelection(); if (s.rangeCount && editor.contains(s.anchorNode)) savedRange=s.getRangeAt(0).cloneRange(); }
+  function withSel(fn){
+    editor.focus();
+    if (savedRange){ var s=window.getSelection(); s.removeAllRanges(); s.addRange(savedRange); }
+    fn(); saveSel(); dirty=true; setStatus('未保存'); refreshPlaceholder();
+  }
+  function exec(cmd,val){ document.execCommand('styleWithCSS',false,true); document.execCommand(cmd,false,val); }
+
+  // Modern formatting tools (reduce execCommand dependency)
+  function getSelectionRange(){
+    var sel=window.getSelection();
+    if(!sel||!sel.rangeCount) return null;
+    return sel.getRangeAt(0);
+  }
+  function wrapSelection(tag, attrs){
+    var range=getSelectionRange();
+    if(!range) return;
+    var el=document.createElement(tag);
+    if(attrs) Object.keys(attrs).forEach(function(k){ el.setAttribute(k, attrs[k]); });
+    range.surroundContents(el);
+    var sel=window.getSelection();
+    sel.removeAllRanges();
+    var r=document.createRange();
+    r.selectNodeContents(el);
+    sel.addRange(r);
+  }
+  function insertHTMLAtCursor(html){
+    var sel=window.getSelection();
+    if(!sel||!sel.rangeCount) return;
+    var range=sel.getRangeAt(0);
+    range.deleteContents();
+    var frag=document.createRange().createContextualFragment(html);
+    var last=frag.lastChild;
+    range.insertNode(frag);
+    if(last){
+      var r=document.createRange();
+      r.setStartAfter(last);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+  }
+
   function deriveTitle(){
     var lines=(editor.innerText||'').split('\\n');
     for (var i=0;i<lines.length;i++){ var t=lines[i].trim(); if(t) return t.slice(0,80); }
@@ -606,6 +651,101 @@ const PAGE = `<!doctype html>
   $('pw').addEventListener('keydown', function(e){ if(e.key==='Enter') doLogin(); });
 
   loadNotes();
+  document.addEventListener('selectionchange', saveSel);
+
+  Array.prototype.forEach.call(document.querySelectorAll('.fmtbar .fb'), function(b){
+    b.addEventListener('mousedown', function(e){ e.preventDefault(); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.fmtbar [data-cmd]'), function(b){
+    b.addEventListener('click', function(){
+  withSel(function(){
+    var cmd=b.getAttribute('data-cmd');
+    var tagMap={bold:'STRONG',italic:'EM',underline:'U'};
+    var tag=tagMap[cmd];
+    if(tag && window.getSelection && window.getSelection().rangeCount){
+      var sel=window.getSelection();
+      var range=sel.getRangeAt(0);
+      if(!range.collapsed){
+        var parent=range.commonAncestorContainer;
+        while(parent && parent!==editor){
+          if(parent.nodeName===tag){
+            var textNode=document.createTextNode(parent.textContent);
+            parent.parentNode.replaceChild(textNode, parent);
+            return;
+          }
+          parent=parent.parentNode;
+        }
+        wrapSelection(tag);
+        return;
+      }
+    }
+    exec(cmd);
+  });
+});
+  });
+  $('fFont').addEventListener('change', function(e){ var v=e.target.value; withSel(function(){ if(v) exec('fontName',v); }); e.target.selectedIndex=0; });
+  $('fColor').addEventListener('input', function(e){ var v=e.target.value; withSel(function(){ exec('foreColor',v); }); });
+  $('fSize').addEventListener('change', function(e){
+    var px=e.target.value; e.target.selectedIndex=0; if(!px) return;
+    withSel(function(){
+      document.execCommand('fontSize',false,'7');
+      var marks=editor.querySelectorAll('font[size="7"]');
+      for (var i=0;i<marks.length;i++){ marks[i].removeAttribute('size'); marks[i].style.fontSize=px; }
+    });
+  });
+  $('bCode').addEventListener('click', function(){ withSel(function(){
+    var t=window.getSelection().toString();
+    if (t) insertHTMLAtCursor('<code>'+escapeHtml(t)+'</code>');
+  }); });
+  $('bPre').addEventListener('click', function(){ withSel(function(){
+    var t=window.getSelection().toString();
+    insertHTMLAtCursor('<pre><code>'+escapeHtml(t||'')+'</code></pre><p><br></p>');
+  }); });
+  $('bLink').addEventListener('click', function(){
+    var url=prompt('链接地址（http/https）'); if(!url) return;
+    if(!/^https?:\\/\\//i.test(url)) url='https://'+url;
+    withSel(function(){
+      var sel=window.getSelection();
+      if (sel && sel.toString()) document.execCommand('createLink',false,url);
+      else document.execCommand('insertHTML',false,'<a href="'+escapeAttr(url)+'" target="_blank" rel="noopener noreferrer">'+escapeHtml(url)+'</a>');
+    });
+  });
+  $('bImg').addEventListener('click', function(){
+    var url=prompt('图片地址（http/https，仅插入链接，不上传）'); if(!url) return;
+    if(!/^https?:\\/\\//i.test(url)){ alert('仅支持 http/https 链接'); return; }
+    withSel(function(){ document.execCommand('insertImage',false,url); });
+  });
+  $('bClear').addEventListener('click', function(){ withSel(function(){
+  var sel=window.getSelection();
+  if(sel&&sel.rangeCount){
+    var range=sel.getRangeAt(0);
+    var text=range.toString();
+    range.deleteContents();
+    range.insertNode(document.createTextNode(text));
+  }
+}); });
+
+  editor.addEventListener('paste', function(e){
+    e.preventDefault();
+    var cd=e.clipboardData||window.clipboardData;
+    var htmlStr=cd.getData('text/html');
+    var clean=htmlStr?sanitize(htmlStr):escapeHtml(cd.getData('text/plain')).replace(/\\n/g,'<br>');
+    document.execCommand('insertHTML',false,clean);
+    dirty=true; setStatus('未保存'); refreshPlaceholder();
+  });
+  editor.addEventListener('input', function(){ dirty=true; setStatus('未保存'); refreshPlaceholder(); });
+
+  $('saveBtn').onclick=function(){ saveNote(); };
+  $('delBtn').onclick=deleteNote;
+  $('newBtn').onclick=newNote;
+  $('backBtn').onclick=function(){ if(dirty) saveNote(); $('app').classList.remove('viewing'); };
+  $('logoutBtn').onclick=function(){ if(confirm('确定要退出登录吗？')) api('/api/logout',{method:'POST'}).then(function(){ location.reload(); }); };
+  $('search').addEventListener('input', function(e){ query=e.target.value; renderList(); });
+  document.addEventListener('keydown', function(e){
+    if ((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='s'){ e.preventDefault(); saveNote(); }
+  });
+  window.addEventListener('beforeunload', function(e){ if(dirty){ e.preventDefault(); e.returnValue=''; } });
+
 })();
 </script>
 </body>
