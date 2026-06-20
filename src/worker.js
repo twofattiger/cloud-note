@@ -3,7 +3,7 @@
 // 加密：暂未启用，但接缝在服务端，密钥用 Secret（用户无需输入任何口令）。
 //
 // 绑定 / 机密：
-//   D1 绑定名：DB
+//   D1 绑定名：NOTE_DB
 //   Secret：AUTH_PASSWORD    登录密码
 //   Secret：SESSION_SECRET   会话签名密钥（随机长串）
 //   Secret：ENC_KEY          （以后启用加密时再加；现在不需要）
@@ -562,6 +562,8 @@ const PAGE = `<!doctype html>
     dirty=true; setStatus('未保存'); refreshPlaceholder();
   });
   editor.addEventListener('input', function(){ dirty=true; setStatus('未保存'); refreshPlaceholder(); });
+  editor.addEventListener('blur', function(){ if(dirty && currentId!==null) saveNote(); });
+  setInterval(function(){ if(dirty && currentId!==null) saveNote(); }, 30000);
 
   $('saveBtn').onclick=function(){ saveNote(); };
   $('delBtn').onclick=deleteNote;
