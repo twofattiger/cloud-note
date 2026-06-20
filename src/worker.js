@@ -562,6 +562,8 @@ const PAGE = `<!doctype html>
     dirty=true; setStatus('未保存'); refreshPlaceholder();
   });
   editor.addEventListener('input', function(){ dirty=true; setStatus('未保存'); refreshPlaceholder(); });
+  editor.addEventListener('blur', function(){ if(dirty && currentId!==null) saveNote(); });
+  setInterval(function(){ if(dirty && currentId!==null) saveNote(); }, 30000);
 
   $('saveBtn').onclick=function(){ saveNote(); };
   $('delBtn').onclick=deleteNote;
