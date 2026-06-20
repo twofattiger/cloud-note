@@ -512,22 +512,36 @@ const PAGE = `<!doctype html>
     var doc=new DOMParser().parseFromString('<body>'+(htmlStr||'')+'</body>','text/html');
     cleanNode(doc.body); return doc.body.innerHTML;
 
-  function renderMarkdown(md){
-    var html=md
-      .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>')
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.+?)\*/g, '<em>$1</em>')
-      .replace(/~~(.+?)~~/g, '<del>$1</del>')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1">')
-      .replace(/^(?:- (.+)\n?)+/gm, function(m){ return '<ul>'+m.replace(/^- (.+)$/gm,'<li>$1</li>')+'</ul>'; })
-      .replace(/^(?:\d+\. (.+)\n?)+/gm, function(m){ return '<ol>'+m.replace(/^\d+\. (.+)$/gm,'<li>$1</li>')+'</ol>'; })
-      .replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>')
+    function renderMarkdown(md){
+    var bt = String.fromCharCode(96);
+    var tripleBt = bt + bt + bt;
+    var html = md;
+    // 代码块
+    html = html.split(tripleBt).reduce(function(acc, part, i){
+      if (i % 2 === 0) return acc + part;
+      var langEnd = part.indexOf(String.fromCharCode(10));
+      var lang = langEnd > 0 ? part.substring(0, langEnd) : '';
+      var code = langEnd > 0 ? part.substring(langEnd + 1) : part;
+      var codeEnd = code.lastIndexOf(tripleBt);
+      if (codeEnd > 0) code = code.substring(0, codeEnd);
+      return acc + '<pre><code class="lang-' + lang + '">' + code + '</code></pre>';
+    }, '');
+    // 行内代码
+    var parts = html.split(bt);
+    html = parts.reduce(function(acc, part, i){
+      return acc + (i % 2 === 0 ? part : '<code>' + part + '</code>');
+    }, '');
+    html = html
+      .replace(/^### (.+)$/gm, '<h3></h3>')
+      .replace(/^## (.+)$/gm, '<h2></h2>')
+      .replace(/^# (.+)$/gm, '<h1></h1>')
+      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em></em></strong>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong></strong>')
+      .replace(/\*(.+?)\*/g, '<em></em>')
+      .replace(/~~(.+?)~~/g, '<del></del>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="" target="_blank" rel="noopener noreferrer"></a>')
+      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="" alt="">')
+      .replace(/^> (.+)$/gm, '<blockquote></blockquote>')
       .replace(/^---$/gm, '<hr>')
       .replace(/\n\n/g, '</p><p>')
       .replace(/\n/g, '<br>');
