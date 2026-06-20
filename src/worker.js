@@ -565,3 +565,9 @@ const PAGE = `<!doctype html>
       }
     }
   }
+
+  loadNotes();
+})();
+</script>
+</body>
+</html>`;
