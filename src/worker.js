@@ -3,7 +3,7 @@
 // 加密：暂未启用，但接缝在服务端，密钥用 Secret（用户无需输入任何口令）。
 //
 // 绑定 / 机密：
-//   D1 绑定名：DB
+//   D1 绑定名：NOTE_DB
 //   Secret：AUTH_PASSWORD    登录密码
 //   Secret：SESSION_SECRET   会话签名密钥（随机长串）
 //   Secret：ENC_KEY          （以后启用加密时再加；现在不需要）
@@ -361,6 +361,38 @@ const PAGE = `<!doctype html>
   var editor = document.getElementById('editor');
   var $ = function(id){ return document.getElementById(id); };
 
+  // IndexedDB cache
+  var dbCache = null;
+  function openCache(cb){
+    if (dbCache) return cb(dbCache);
+    var req = indexedDB.open('cloud-note-cache', 1);
+    req.onupgradeneeded = function(e){
+      var idb = e.target.result;
+      if (!idb.objectStoreNames.contains('notes')) idb.createObjectStore('notes', { keyPath: 'id' });
+    };
+    req.onsuccess = function(e){ dbCache = e.target.result; cb(dbCache); };
+    req.onerror = function(){ cb(null); };
+  }
+  function cacheNotes(list, cb){
+    openCache(function(idb){
+      if (!idb) return cb && cb();
+      var tx = idb.transaction('notes', 'readwrite');
+      var store = tx.objectStore('notes');
+      store.clear();
+      list.forEach(function(n){ store.put(n); });
+      tx.oncomplete = function(){ cb && cb(); };
+    });
+  }
+  function loadCachedNotes(cb){
+    openCache(function(idb){
+      if (!idb) return cb([]);
+      var tx = idb.transaction('notes', 'readonly');
+      var req = tx.objectStore('notes').getAll();
+      req.onsuccess = function(){ cb(req.result || []); };
+      req.onerror = function(){ cb([]); };
+    });
+  }
+
   function api(path, opts){
     opts = opts || {}; opts.credentials = 'same-origin';
     opts.headers = Object.assign({ 'Content-Type':'application/json' }, opts.headers || {});
@@ -432,9 +464,15 @@ const PAGE = `<!doctype html>
   function showFmt(on){ $('fmtbar').classList.toggle('show', !!on); }
 
   function loadNotes(){
+    loadCachedNotes(function(cached){
+      if (cached && cached.length){
+        notes=cached; showApp(); renderList();
+      }
+    });
     api('/api/notes').then(function(data){
       notes=(data||[]).map(function(n){ n.titlePlain=n.title||''; return n; });
       showApp(); renderList();
+      cacheNotes(notes);
     }).catch(function(){});
   }
   function renderList(){
@@ -489,6 +527,7 @@ const PAGE = `<!doctype html>
         if(n){ n.titlePlain=titleText; n.updated_at=r.updated_at; }
         notes.sort(function(a,b){return b.updated_at-a.updated_at;});
         renderList(); setStatus('已保存 '+fmt(r.updated_at));
+        cacheNotes(notes);
         if (typeof after==='function') after();
       });
   }
@@ -500,6 +539,7 @@ const PAGE = `<!doctype html>
       notes=notes.filter(function(x){return x.id!==id;});
       currentId=null; dirty=false; editor.innerHTML=''; refreshPlaceholder();
       setStatus(''); renderList(); showFmt(false); $('app').classList.remove('viewing');
+      cacheNotes(notes);
     });
   }
 
