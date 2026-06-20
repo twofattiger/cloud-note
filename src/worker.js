@@ -538,7 +538,8 @@ const PAGE = `<!doctype html>
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
   function deriveTitle(){
-    var lines=(editor.innerText||'').split('\\n');
+    var text=editorMode==='markdown'? (editor.value||'') : (editor.innerText||'');
+    var lines=text.split('\\n');
     for (var i=0;i<lines.length;i++){ var t=lines[i].trim(); if(t) return t.slice(0,80); }
     return '新建备忘';
   }
@@ -630,6 +631,138 @@ const PAGE = `<!doctype html>
   }
 
   function loadNotes(){
+  function openNote(id){
+    function load(){
+      api('/api/notes/'+id).then(function(note){
+        currentId=id; dirty=false;
+        if(editorMode==='markdown'){ editor.value=note.content||''; } else { editor.innerHTML=sanitize(note.content); } refreshPlaceholder();
+        setStatus('编辑于 '+fmt(note.updated_at)); renderList(); showFmt(true);
+        $('app').classList.add('viewing'); editor.focus();
+      });
+    }
+    if (dirty) saveNote(load); else load();
+  }
+  function newNote(){
+    function go(){
+      api('/api/notes',{method:'POST'}).then(function(n){
+        notes.unshift({ id:n.id, title:'', updated_at:n.updated_at, titlePlain:'新建备忘' });
+        currentId=n.id; dirty=false; editor.innerHTML=''; refreshPlaceholder();
+        setStatus('新建'); renderList(); showFmt(true);
+        $('app').classList.add('viewing'); editor.focus();
+      });
+    }
+    if (dirty) saveNote(go); else go();
+  }
+  function saveNote(after){
+    if (currentId===null) return;
+    var content=editorMode==='markdown'? editor.value : sanitize(editor.innerHTML), titleText=deriveTitle();
+    setStatus('保存中…');
+    api('/api/notes/'+currentId,{ method:'PUT', body: JSON.stringify({ title:titleText, content:content }) })
+      .then(function(r){
+        dirty=false;
+        var n=notes.find(function(x){return x.id===currentId;});
+        if(n){ n.titlePlain=titleText; n.updated_at=r.updated_at; }
+        notes.sort(function(a,b){return b.updated_at-a.updated_at;});
+        renderList(); setStatus('已保存 '+fmt(r.updated_at));
+        if (typeof after==='function') after();
+      });
+  }
+  function deleteNote(){
+    if (currentId===null) return;
+    if (!confirm('删除这条备忘？')) return;
+    var id=currentId;
+    api('/api/notes/'+id,{method:'DELETE'}).then(function(){
+      notes=notes.filter(function(x){return x.id!==id;});
+      currentId=null; dirty=false; editor.innerHTML=''; refreshPlaceholder();
+      setStatus(''); renderList(); showFmt(false); $('app').classList.remove('viewing');
+    });
+  }
+
+  // ---- 富文本（contenteditable + execCommand） ----
+  function saveSel(){ var s=window.getSelection(); if (s.rangeCount && editor.contains(s.anchorNode)) savedRange=s.getRangeAt(0).cloneRange(); }
+  function withSel(fn){
+    editor.focus();
+    if (savedRange){ var s=window.getSelection(); s.removeAllRanges(); s.addRange(savedRange); }
+    fn(); saveSel(); dirty=true; setStatus('未保存'); refreshPlaceholder();
+  }
+  function exec(cmd,val){ document.execCommand('styleWithCSS',false,true); document.execCommand(cmd,false,val); }
+  document.addEventListener('selectionchange', saveSel);
+
+  Array.prototype.forEach.call(document.querySelectorAll('.fmtbar .fb'), function(b){
+    b.addEventListener('mousedown', function(e){ e.preventDefault(); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.fmtbar [data-cmd]'), function(b){
+    b.addEventListener('click', function(){ withSel(function(){ exec(b.getAttribute('data-cmd')); }); });
+  });
+  $('fFont').addEventListener('change', function(e){ var v=e.target.value; withSel(function(){ if(v) exec('fontName',v); }); e.target.selectedIndex=0; });
+  $('fColor').addEventListener('input', function(e){ var v=e.target.value; withSel(function(){ exec('foreColor',v); }); });
+  $('fSize').addEventListener('change', function(e){
+    var px=e.target.value; e.target.selectedIndex=0; if(!px) return;
+    withSel(function(){
+      document.execCommand('fontSize',false,'7');
+      var marks=editor.querySelectorAll('font[size="7"]');
+      for (var i=0;i<marks.length;i++){ marks[i].removeAttribute('size'); marks[i].style.fontSize=px; }
+    });
+  });
+  $('bCode').addEventListener('click', function(){ withSel(function(){
+    var t=window.getSelection().toString();
+    if (t) document.execCommand('insertHTML',false,'<code>'+escapeHtml(t)+'</code>');
+  }); });
+  $('bPre').addEventListener('click', function(){ withSel(function(){
+    var t=window.getSelection().toString();
+    document.execCommand('insertHTML',false,'<pre><code>'+escapeHtml(t||'')+'</code></pre><p><br></p>');
+  }); });
+  $('bLink').addEventListener('click', function(){
+    var url=prompt('链接地址（http/https）'); if(!url) return;
+    if(!/^https?:\\/\\//i.test(url)) url='https://'+url;
+    withSel(function(){
+      var sel=window.getSelection();
+      if (sel && sel.toString()) document.execCommand('createLink',false,url);
+      else document.execCommand('insertHTML',false,'<a href="'+escapeAttr(url)+'" target="_blank" rel="noopener noreferrer">'+escapeHtml(url)+'</a>');
+    });
+  });
+  $('bImg').addEventListener('click', function(){
+    var url=prompt('图片地址（http/https，仅插入链接，不上传）'); if(!url) return;
+    if(!/^https?:\\/\\//i.test(url)){ alert('仅支持 http/https 链接'); return; }
+    withSel(function(){ document.execCommand('insertImage',false,url); });
+  });
+  $('bClear').addEventListener('click', function(){ withSel(function(){ document.execCommand('removeFormat'); document.execCommand('unlink'); }); });
+
+  editor.addEventListener('paste', function(e){
+    e.preventDefault();
+    var cd=e.clipboardData||window.clipboardData;
+    var htmlStr=cd.getData('text/html');
+    var clean=htmlStr?sanitize(htmlStr):escapeHtml(cd.getData('text/plain')).replace(/\\n/g,'<br>');
+    document.execCommand('insertHTML',false,clean);
+    dirty=true; setStatus('未保存'); refreshPlaceholder();
+  });
+  editor.addEventListener('input', function(){ dirty=true; setStatus('未保存'); refreshPlaceholder(); });
+
+  $('saveBtn').onclick=function(){ saveNote(); };
+  $('delBtn').onclick=deleteNote;
+  $('newBtn').onclick=newNote;
+  $('backBtn').onclick=function(){ if(dirty) saveNote(); $('app').classList.remove('viewing'); };
+  $('logoutBtn').onclick=function(){ if(confirm('确定要退出登录吗？')) api('/api/logout',{method:'POST'}).then(function(){ location.reload(); }); };
+  $('search').addEventListener('input', function(e){ query=e.target.value; renderList(); });
+  document.addEventListener('keydown', function(e){
+    if ((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='s'){ e.preventDefault(); saveNote(); }
+  });
+  window.addEventListener('beforeunload', function(e){ if(dirty){ e.preventDefault(); e.returnValue=''; } });
+
+  function doLogin(){
+    $('loginErr').textContent=''; $('loginBtn').disabled=true;
+    fetch('/api/login',{ method:'POST', credentials:'same-origin',
+      headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ password:$('pw').value }) })
+      .then(function(res){
+        if (res.ok){ $('pw').value=''; $('loginBtn').disabled=false; loadNotes(); return; }
+        return res.json().then(function(d){
+          $('loginBtn').disabled=false;
+          if (res.status===429) $('loginErr').textContent='尝试过多，请约 '+(d.retry_after||60)+' 秒后再试';
+          else if (typeof d.remaining==='number') $('loginErr').textContent='密码错误，还可尝试 '+d.remaining+' 次';
+          else $('loginErr').textContent='密码错误';
+        });
+      })
+      .catch(function(){ $('loginBtn').disabled=false; $('loginErr').textContent='网络错误'; });
     api('/api/notes').then(function(data){
       notes=(data||[]).map(function(n){ n.titlePlain=n.title||''; return n; });
       showApp(); renderList();
@@ -663,6 +796,7 @@ const PAGE = `<!doctype html>
     }
   }
   $('loginBtn').onclick=doLogin;
+  modeBtn.onclick=toggleMode;
   $('pw').addEventListener('keydown', function(e){ if(e.key==='Enter') doLogin(); });
 
   loadNotes();
