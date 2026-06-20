@@ -417,6 +417,7 @@ const PAGE = `<!doctype html>
         <button class="btn back" id="backBtn">返回</button>
         <span class="status" id="status"></span>
         <button class="btn danger" id="delBtn">删除</button>
+        <button class="btn" id="modeBtn" title="切换编辑模式">富文本</button>
         <button class="btn primary" id="saveBtn">保存</button>
       </div>
       <div class="fmtbar" id="fmtbar">
@@ -510,6 +511,28 @@ const PAGE = `<!doctype html>
   function sanitize(htmlStr){
     var doc=new DOMParser().parseFromString('<body>'+(htmlStr||'')+'</body>','text/html');
     cleanNode(doc.body); return doc.body.innerHTML;
+
+  function renderMarkdown(md){
+    var html=md
+      .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+      .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+      .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .replace(/~~(.+?)~~/g, '<del>$1</del>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1">')
+      .replace(/^(?:- (.+)\n?)+/gm, function(m){ return '<ul>'+m.replace(/^- (.+)$/gm,'<li>$1</li>')+'</ul>'; })
+      .replace(/^(?:\d+\. (.+)\n?)+/gm, function(m){ return '<ol>'+m.replace(/^\d+\. (.+)$/gm,'<li>$1</li>')+'</ol>'; })
+      .replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>')
+      .replace(/^---$/gm, '<hr>')
+      .replace(/\n\n/g, '</p><p>')
+      .replace(/\n/g, '<br>');
+    return '<p>'+html+'</p>';
+  }
   }
   function escapeHtml(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
@@ -567,6 +590,43 @@ const PAGE = `<!doctype html>
     var sel=noteTagSelect; if(!sel) return;
     var ids=[]; for(var i=0;i<sel.options.length;i++){ if(sel.options[i].selected) ids.push(Number(sel.options[i].value)); }
     api('/api/notes/'+currentId+'/tags',{method:'PUT',body:JSON.stringify({tag_ids:ids})});
+  }
+
+  // ---- Markdown Mode ----
+  var editorMode='richtext';
+
+  function toggleMode(){
+    if(editorMode==='richtext'){
+      editorMode='markdown';
+      var text=editor.innerText||'';
+      var ta=document.createElement('textarea');
+      ta.id='mdEditor';
+      ta.value=text;
+      ta.style.cssText='width:100%;height:100%;border:none;outline:none;resize:none;font:16px/1.7 ui-monospace,Consolas,monospace;color:var(--ink);background:var(--panel);padding:0';
+      editor.parentNode.replaceChild(ta, editor);
+      editor=ta;
+      modeBtn.textContent='Markdown';
+      modeBtn.classList.add('active');
+      fmtbar.classList.remove('show');
+      dirty=true; setStatus('未保存');
+    } else {
+      editorMode='richtext';
+      var md=editor.value||'';
+      var html=renderMarkdown(md);
+      var div=document.createElement('div');
+      div.id='editor';
+      div.contentEditable='true';
+      div.spellcheck=false;
+      div.setAttribute('data-placeholder','开始输入…');
+      div.innerHTML=sanitize(html);
+      editor.parentNode.replaceChild(div, editor);
+      editor=div;
+      modeBtn.textContent='富文本';
+      modeBtn.classList.remove('active');
+      showFmt(true);
+      dirty=true; setStatus('未保存');
+      refreshPlaceholder();
+    }
   }
 
   function loadNotes(){
