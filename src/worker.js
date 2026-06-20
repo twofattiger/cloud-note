@@ -174,7 +174,7 @@ async function handleApi(request, env, url) {
   if (p === '/api/notes') {
     if (method === 'GET') {
       const r = await db.prepare(
-        'SELECT id, title, format, updated_at FROM notes ORDER BY updated_at DESC').all();
+        'SELECT id, title, format, updated_at FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC').all();
       const rows = r.results || [], out = [];
       for (const row of rows) {
         out.push({ id: row.id, title: await decStore(env, row.title, row.format), updated_at: row.updated_at });
@@ -217,7 +217,32 @@ async function handleApi(request, env, url) {
       return json({ ok: true, updated_at: now });
     }
     if (method === 'DELETE') {
-      await db.prepare('DELETE FROM notes WHERE id = ?').bind(id).run();
+      await db.prepare('UPDATE notes SET deleted_at = ? WHERE id = ?').bind(Date.now(), id).run();
+      return json({ ok: true });
+    }
+  }
+
+  // ---- Trash ----
+  if (p === '/api/trash' && method === 'GET') {
+    const r = await db.prepare(
+      'SELECT id, title, format, updated_at, deleted_at FROM notes WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC').all();
+    const rows = r.results || [], out = [];
+    for (const row of rows) {
+      out.push({ id: row.id, title: await decStore(env, row.title, row.format), updated_at: row.updated_at, deleted_at: row.deleted_at });
+    }
+    return json(out);
+  }
+
+  const trashM = p.match(/^\/api\/trash\/(\d+)\/(restore|permanent)$/);
+  if (trashM) {
+    const noteId = Number(trashM[1]);
+    const action = trashM[2];
+    if (action === 'restore') {
+      await db.prepare('UPDATE notes SET deleted_at = NULL WHERE id = ?').bind(noteId).run();
+      return json({ ok: true });
+    }
+    if (action === 'permanent') {
+      await db.prepare('DELETE FROM notes WHERE id = ?').bind(noteId).run();
       return json({ ok: true });
     }
   }
@@ -289,6 +314,17 @@ const PAGE = `<!doctype html>
   #editor pre{background:var(--code-bg);padding:12px 14px;border-radius:9px;overflow:auto}
   #editor pre code{background:none;padding:0}
   @media (max-width:720px){.sidebar{flex-basis:100%;width:100%}.main{display:none}#app.viewing .sidebar{display:none}#app.viewing .main{display:flex}.toolbar .back{display:inline-block}}
+  .tags-filter{display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px}
+  .tags-filter .tag-chip{padding:3px 10px;border-radius:12px;font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;white-space:nowrap}
+  .tags-filter .tag-chip.active{background:var(--sel);border-color:var(--accent)}
+  .fmtbar .tag-select{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);padding:0 6px;font-size:13px}
+  .trash-item{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+  .trash-item .t{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .trash-item .d{font-size:12px;color:var(--muted);white-space:nowrap}
+  .trash-item .actions{display:flex;gap:4px}
+  .trash-item .actions button{padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:12px}
+  .trash-item .actions button:hover{background:var(--bg)}
+  .trash-item .actions button.danger{color:#d4584a;border-color:#d4584a}
 </style>
 </head>
 <body>
@@ -308,6 +344,7 @@ const PAGE = `<!doctype html>
         <span class="grow">备忘</span>
         <button class="icon-btn" id="newBtn" title="新建">+</button>
         <button class="icon-btn" id="logoutBtn" title="退出" style="font-size:15px">退出</button>
+        <button class="icon-btn" id="trashBtn" title="回收站" style="font-size:15px">&#x1F5D1;</button>
       </div>
       <input class="search" id="search" placeholder="搜索标题…">
       <div class="list" id="list"></div>
@@ -457,6 +494,7 @@ const PAGE = `<!doctype html>
   }
 
   function openNote(id){
+    if(trashView) return;
     function load(){
       api('/api/notes/'+id).then(function(note){
         currentId=id; dirty=false;
@@ -568,6 +606,45 @@ const PAGE = `<!doctype html>
   $('newBtn').onclick=newNote;
   $('backBtn').onclick=function(){ if(dirty) saveNote(); $('app').classList.remove('viewing'); };
   $('logoutBtn').onclick=function(){ if(confirm('确定要退出登录吗？')) api('/api/logout',{method:'POST'}).then(function(){ location.reload(); }); };
+
+  // ---- Trash ----
+  var trashView=false;
+  function loadTrash(){
+    trashView=true; app.classList.add('viewing');
+    api('/api/trash').then(function(data){
+      var list=list; list.innerHTML='';
+      status.textContent='回收站';
+      if(!data||!data.length){
+        var e=document.createElement('div'); e.className='empty-list'; e.textContent='回收站为空';
+        list.appendChild(e); return;
+      }
+      data.forEach(function(n){
+        var item=document.createElement('div'); item.className='trash-item';
+        var t=document.createElement('div'); t.className='t'; t.textContent=(n.title||'').trim()||'新建备忘';
+        var d=document.createElement('div'); d.className='d'; d.textContent=fmt(n.deleted_at);
+        var acts=document.createElement('div'); acts.className='actions';
+        var restoreBtn=document.createElement('button'); restoreBtn.textContent='恢复';
+        restoreBtn.onclick=function(e){
+          e.stopPropagation();
+          api('/api/trash/'+n.id+'/restore',{method:'POST'}).then(function(){ loadTrash(); loadNotes(); });
+        };
+        var permBtn=document.createElement('button'); permBtn.textContent='永久删除'; permBtn.className='danger';
+        permBtn.onclick=function(e){
+          e.stopPropagation();
+          if(!confirm('永久删除这条备忘？不可恢复。')) return;
+          api('/api/trash/'+n.id+'/permanent',{method:'POST'}).then(function(){ loadTrash(); });
+        };
+        acts.appendChild(restoreBtn); acts.appendChild(permBtn);
+        item.appendChild(t); item.appendChild(d); item.appendChild(acts);
+        list.appendChild(item);
+      });
+    });
+  }
+  function exitTrash(){
+    trashView=false; app.classList.remove('viewing'); renderList();
+  }
+
+  trashBtn.onclick=function(){ if(trashView) exitTrash(); else loadTrash(); };
   $('search').addEventListener('input', function(e){ query=e.target.value; renderList(); });
   document.addEventListener('keydown', function(e){
     if ((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='s'){ e.preventDefault(); saveNote(); }

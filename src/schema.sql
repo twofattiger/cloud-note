@@ -14,3 +14,5 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   first_fail_at INTEGER NOT NULL DEFAULT 0,
   banned_until INTEGER NOT NULL DEFAULT 0
 );
+-- 回收站：软删除支持
+ALTER TABLE notes ADD COLUMN deleted_at INTEGER DEFAULT NULL;
