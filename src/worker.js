@@ -3,7 +3,7 @@
 // 加密：暂未启用，但接缝在服务端，密钥用 Secret（用户无需输入任何口令）。
 //
 // 绑定 / 机密：
-//   D1 绑定名：DB
+//   D1 绑定名：NOTE_DB
 //   Secret：AUTH_PASSWORD    登录密码
 //   Secret：SESSION_SECRET   会话签名密钥（随机长串）
 //   Secret：ENC_KEY          （以后启用加密时再加；现在不需要）
@@ -174,7 +174,7 @@ async function handleApi(request, env, url) {
   if (p === '/api/notes') {
     if (method === 'GET') {
       const r = await db.prepare(
-        'SELECT id, title, format, updated_at FROM notes ORDER BY updated_at DESC').all();
+        'SELECT id, title, format, updated_at FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC').all();
       const rows = r.results || [], out = [];
       for (const row of rows) {
         out.push({ id: row.id, title: await decStore(env, row.title, row.format), updated_at: row.updated_at });
@@ -217,9 +217,92 @@ async function handleApi(request, env, url) {
       return json({ ok: true, updated_at: now });
     }
     if (method === 'DELETE') {
-      await db.prepare('DELETE FROM notes WHERE id = ?').bind(id).run();
+      await db.prepare('UPDATE notes SET deleted_at = ? WHERE id = ?').bind(Date.now(), id).run();
       return json({ ok: true });
     }
+  }
+
+  // ---- Trash ----
+  if (p === '/api/trash' && method === 'GET') {
+    const r = await db.prepare(
+      'SELECT id, title, format, updated_at, deleted_at FROM notes WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC').all();
+    const rows = r.results || [], out = [];
+    for (const row of rows) {
+      out.push({ id: row.id, title: await decStore(env, row.title, row.format), updated_at: row.updated_at, deleted_at: row.deleted_at });
+    }
+    return json(out);
+  }
+
+  const trashM = p.match(/^\/api\/trash\/(\d+)\/(restore|permanent)$/);
+  if (trashM) {
+    const noteId = Number(trashM[1]);
+    const action = trashM[2];
+    if (action === 'restore') {
+      await db.prepare('UPDATE notes SET deleted_at = NULL WHERE id = ?').bind(noteId).run();
+      return json({ ok: true });
+    }
+    if (action === 'permanent') {
+      await db.prepare('DELETE FROM notes WHERE id = ?').bind(noteId).run();
+      return json({ ok: true });
+    }
+  }
+
+  // ---- Tags CRUD ----
+  if (p === '/api/tags') {
+    if (method === 'GET') {
+      const r = await db.prepare('SELECT id, name, color FROM tags ORDER BY name').all();
+      return json(r.results || []);
+    }
+    if (method === 'POST') {
+      const b = await request.json().catch(() => ({}));
+      const name = (typeof b.name === 'string' ? b.name.trim() : '').slice(0, 50);
+      const color = (typeof b.color === 'string' ? b.color : '#8a8a8f').slice(0, 20);
+      if (!name) return json({ error: 'name_required' }, 400);
+      try {
+        const r = await db.prepare('INSERT INTO tags (name, color) VALUES (?, ?)').bind(name, color).run();
+        return json({ id: r.meta.last_row_id, name, color });
+      } catch (e) {
+        if (String(e).includes('UNIQUE')) return json({ error: 'tag_exists' }, 409);
+        throw e;
+      }
+    }
+  }
+
+  const tagM = p.match(/^\/api\/tags\/(\d+)$/);
+  if (tagM) {
+    const tagId = Number(tagM[1]);
+    if (method === 'PUT') {
+      const b = await request.json().catch(() => ({}));
+      const name = (typeof b.name === 'string' ? b.name.trim() : '').slice(0, 50);
+      const color = (typeof b.color === 'string' ? b.color : '#8a8a8f').slice(0, 20);
+      if (!name) return json({ error: 'name_required' }, 400);
+      await db.prepare('UPDATE tags SET name=?, color=? WHERE id=?').bind(name, color, tagId).run();
+      return json({ ok: true });
+    }
+    if (method === 'DELETE') {
+      await db.prepare('DELETE FROM tags WHERE id=?').bind(tagId).run();
+      return json({ ok: true });
+    }
+  }
+
+  // Note tags
+  const noteTagM = p.match(/^\/api\/notes\/(\d+)\/tags$/);
+  if (noteTagM && method === 'GET') {
+    const noteId = Number(noteTagM[1]);
+    const r = await db.prepare(
+      'SELECT t.id, t.name, t.color FROM tags t JOIN note_tags nt ON t.id=nt.tag_id WHERE nt.note_id=? ORDER BY t.name'
+    ).bind(noteId).all();
+    return json(r.results || []);
+  }
+  if (noteTagM && method === 'PUT') {
+    const noteId = Number(noteTagM[1]);
+    const b = await request.json().catch(() => ({}));
+    const tagIds = Array.isArray(b.tag_ids) ? b.tag_ids.map(Number).filter(Boolean) : [];
+    await db.prepare('DELETE FROM note_tags WHERE note_id=?').bind(noteId).run();
+    for (const tid of tagIds) {
+      await db.prepare('INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?, ?)').bind(noteId, tid).run();
+    }
+    return json({ ok: true });
   }
   return json({ error: 'not_found' }, 404);
 }
@@ -261,6 +344,10 @@ const PAGE = `<!doctype html>
   .icon-btn:hover{background:var(--bg);color:var(--ink)}
   .search{margin:10px 12px;padding:8px 11px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--ink);font-size:14px}
   .search:focus{outline:none;border-color:var(--accent)}
+  .tags-filter{display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px}
+  .tags-filter .tag-chip{padding:3px 10px;border-radius:12px;font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;white-space:nowrap}
+  .tags-filter .tag-chip.active{background:var(--sel);border-color:var(--accent)}
+  .fmtbar .tag-select{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);padding:0 6px;font-size:13px}
   .list{flex:1;overflow:auto}
   .item{padding:12px 14px;border-bottom:1px solid var(--line);cursor:pointer}
   .item:hover{background:var(--bg)}.item.active{background:var(--sel)}
@@ -289,6 +376,17 @@ const PAGE = `<!doctype html>
   #editor pre{background:var(--code-bg);padding:12px 14px;border-radius:9px;overflow:auto}
   #editor pre code{background:none;padding:0}
   @media (max-width:720px){.sidebar{flex-basis:100%;width:100%}.main{display:none}#app.viewing .sidebar{display:none}#app.viewing .main{display:flex}.toolbar .back{display:inline-block}}
+  .tags-filter{display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px}
+  .tags-filter .tag-chip{padding:3px 10px;border-radius:12px;font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;white-space:nowrap}
+  .tags-filter .tag-chip.active{background:var(--sel);border-color:var(--accent)}
+  .fmtbar .tag-select{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);padding:0 6px;font-size:13px}
+  .trash-item{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+  .trash-item .t{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .trash-item .d{font-size:12px;color:var(--muted);white-space:nowrap}
+  .trash-item .actions{display:flex;gap:4px}
+  .trash-item .actions button{padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:12px}
+  .trash-item .actions button:hover{background:var(--bg)}
+  .trash-item .actions button.danger{color:#d4584a;border-color:#d4584a}
 </style>
 </head>
 <body>
@@ -308,8 +406,10 @@ const PAGE = `<!doctype html>
         <span class="grow">备忘</span>
         <button class="icon-btn" id="newBtn" title="新建">+</button>
         <button class="icon-btn" id="logoutBtn" title="退出" style="font-size:15px">退出</button>
+        <button class="icon-btn" id="trashBtn" title="回收站" style="font-size:15px">&#x1F5D1;</button>
       </div>
       <input class="search" id="search" placeholder="搜索标题…">
+      <div class="tags-filter" id="tagsFilter"></div>
       <div class="list" id="list"></div>
     </aside>
     <section class="main">
@@ -317,6 +417,7 @@ const PAGE = `<!doctype html>
         <button class="btn back" id="backBtn">返回</button>
         <span class="status" id="status"></span>
         <button class="btn danger" id="delBtn">删除</button>
+        <button class="btn" id="modeBtn" title="切换编辑模式">富文本</button>
         <button class="btn primary" id="saveBtn">保存</button>
       </div>
       <div class="fmtbar" id="fmtbar">
@@ -348,6 +449,8 @@ const PAGE = `<!doctype html>
         <button class="fb" id="bImg" title="图片链接">图片</button>
         <span class="sep"></span>
         <button class="fb" id="bClear" title="清除格式">清除</button>
+        <span class="sep"></span>
+        <select id="noteTagSelect" class="tag-select" title="标签" multiple></select>
       </div>
       <div class="edit-wrap">
         <div id="editor" contenteditable="true" spellcheck="false" data-placeholder="开始输入…"></div>
@@ -408,12 +511,49 @@ const PAGE = `<!doctype html>
   function sanitize(htmlStr){
     var doc=new DOMParser().parseFromString('<body>'+(htmlStr||'')+'</body>','text/html');
     cleanNode(doc.body); return doc.body.innerHTML;
+
+    function renderMarkdown(md){
+    var bt = String.fromCharCode(96);
+    var tripleBt = bt + bt + bt;
+    var html = md;
+    // 代码块
+    html = html.split(tripleBt).reduce(function(acc, part, i){
+      if (i % 2 === 0) return acc + part;
+      var langEnd = part.indexOf(String.fromCharCode(10));
+      var lang = langEnd > 0 ? part.substring(0, langEnd) : '';
+      var code = langEnd > 0 ? part.substring(langEnd + 1) : part;
+      var codeEnd = code.lastIndexOf(tripleBt);
+      if (codeEnd > 0) code = code.substring(0, codeEnd);
+      return acc + '<pre><code class="lang-' + lang + '">' + code + '</code></pre>';
+    }, '');
+    // 行内代码
+    var parts = html.split(bt);
+    html = parts.reduce(function(acc, part, i){
+      return acc + (i % 2 === 0 ? part : '<code>' + part + '</code>');
+    }, '');
+    html = html
+      .replace(/^### (.+)$/gm, '<h3></h3>')
+      .replace(/^## (.+)$/gm, '<h2></h2>')
+      .replace(/^# (.+)$/gm, '<h1></h1>')
+      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em></em></strong>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong></strong>')
+      .replace(/\*(.+?)\*/g, '<em></em>')
+      .replace(/~~(.+?)~~/g, '<del></del>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="" target="_blank" rel="noopener noreferrer"></a>')
+      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="" alt="">')
+      .replace(/^> (.+)$/gm, '<blockquote></blockquote>')
+      .replace(/^---$/gm, '<hr>')
+      .replace(/\n\n/g, '</p><p>')
+      .replace(/\n/g, '<br>');
+    return '<p>'+html+'</p>';
+  }
   }
   function escapeHtml(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
   function deriveTitle(){
-    var lines=(editor.innerText||'').split('\\n');
+    var text=editorMode==='markdown'? (editor.value||'') : (editor.innerText||'');
+    var lines=text.split('\\n');
     for (var i=0;i<lines.length;i++){ var t=lines[i].trim(); if(t) return t.slice(0,80); }
     return '新建备忘';
   }
@@ -431,36 +571,85 @@ const PAGE = `<!doctype html>
   function setStatus(s){ $('status').textContent=s||''; }
   function showFmt(on){ $('fmtbar').classList.toggle('show', !!on); }
 
-  function loadNotes(){
-    api('/api/notes').then(function(data){
-      notes=(data||[]).map(function(n){ n.titlePlain=n.title||''; return n; });
-      showApp(); renderList();
-    }).catch(function(){});
+  var allTags=[], currentNoteTags=[], activeTagFilter=null;
+
+  function loadTags(){
+    api('/api/tags').then(function(data){ allTags=data||[]; renderTagsFilter(); renderTagSelect(); });
   }
-  function renderList(){
-    var list=$('list'); list.innerHTML='';
-    var q=query.trim().toLowerCase();
-    var shown=notes.filter(function(n){ return !q||(n.titlePlain||'').toLowerCase().indexOf(q)>=0; });
-    if (!shown.length){
-      var e=document.createElement('div'); e.className='empty-list';
-      e.textContent=q?'没有匹配的备忘':'还没有备忘，点右上角 + 新建';
-      list.appendChild(e); return;
-    }
-    shown.forEach(function(n){
-      var item=document.createElement('div'); item.className='item'+(n.id===currentId?' active':'');
-      var t=document.createElement('div'); t.className='t'; t.textContent=(n.titlePlain&&n.titlePlain.trim())?n.titlePlain:'新建备忘';
-      var d=document.createElement('div'); d.className='d'; d.textContent=fmt(n.updated_at);
-      item.appendChild(t); item.appendChild(d);
-      item.onclick=function(){ openNote(n.id); };
-      list.appendChild(item);
+  function renderTagsFilter(){
+    var c=tagsFilter; c.innerHTML='';
+    var all=document.createElement('span'); all.className='tag-chip'+(activeTagFilter===null?' active':'');
+    all.textContent='全部'; all.onclick=function(){ activeTagFilter=null; renderList(); renderTagsFilter(); };
+    c.appendChild(all);
+    allTags.forEach(function(tag){
+      var chip=document.createElement('span'); chip.className='tag-chip'+(activeTagFilter===tag.id?' active':'');
+      chip.textContent=tag.name; chip.style.borderColor=tag.color;
+      chip.onclick=function(){ activeTagFilter=tag.id; renderList(); renderTagsFilter(); };
+      c.appendChild(chip);
     });
   }
+  function renderTagSelect(){
+    var sel=noteTagSelect; if(!sel) return;
+    sel.innerHTML='';
+    allTags.forEach(function(tag){
+      var opt=document.createElement('option'); opt.value=tag.id; opt.textContent=tag.name;
+      opt.selected=currentNoteTags.some(function(t){return t.id===tag.id;});
+      sel.appendChild(opt);
+    });
+  }
+  function loadNoteTags(noteId){
+    api('/api/notes/'+noteId+'/tags').then(function(data){ currentNoteTags=data||[]; renderTagSelect(); });
+  }
+  function saveNoteTags(){
+    if(currentId===null) return;
+    var sel=noteTagSelect; if(!sel) return;
+    var ids=[]; for(var i=0;i<sel.options.length;i++){ if(sel.options[i].selected) ids.push(Number(sel.options[i].value)); }
+    api('/api/notes/'+currentId+'/tags',{method:'PUT',body:JSON.stringify({tag_ids:ids})});
+  }
 
+  // ---- Markdown Mode ----
+  var editorMode='richtext';
+
+  function toggleMode(){
+    if(editorMode==='richtext'){
+      editorMode='markdown';
+      var text=editor.innerText||'';
+      var ta=document.createElement('textarea');
+      ta.id='mdEditor';
+      ta.value=text;
+      ta.style.cssText='width:100%;height:100%;border:none;outline:none;resize:none;font:16px/1.7 ui-monospace,Consolas,monospace;color:var(--ink);background:var(--panel);padding:0';
+      editor.parentNode.replaceChild(ta, editor);
+      editor=ta;
+      modeBtn.textContent='Markdown';
+      modeBtn.classList.add('active');
+      fmtbar.classList.remove('show');
+      dirty=true; setStatus('未保存');
+    } else {
+      editorMode='richtext';
+      var md=editor.value||'';
+      var html=renderMarkdown(md);
+      var div=document.createElement('div');
+      div.id='editor';
+      div.contentEditable='true';
+      div.spellcheck=false;
+      div.setAttribute('data-placeholder','开始输入…');
+      div.innerHTML=sanitize(html);
+      editor.parentNode.replaceChild(div, editor);
+      editor=div;
+      modeBtn.textContent='富文本';
+      modeBtn.classList.remove('active');
+      showFmt(true);
+      dirty=true; setStatus('未保存');
+      refreshPlaceholder();
+    }
+  }
+
+  function loadNotes(){
   function openNote(id){
     function load(){
       api('/api/notes/'+id).then(function(note){
         currentId=id; dirty=false;
-        editor.innerHTML=sanitize(note.content); refreshPlaceholder();
+        if(editorMode==='markdown'){ editor.value=note.content||''; } else { editor.innerHTML=sanitize(note.content); } refreshPlaceholder();
         setStatus('编辑于 '+fmt(note.updated_at)); renderList(); showFmt(true);
         $('app').classList.add('viewing'); editor.focus();
       });
@@ -480,7 +669,7 @@ const PAGE = `<!doctype html>
   }
   function saveNote(after){
     if (currentId===null) return;
-    var content=sanitize(editor.innerHTML), titleText=deriveTitle();
+    var content=editorMode==='markdown'? editor.value : sanitize(editor.innerHTML), titleText=deriveTitle();
     setStatus('保存中…');
     api('/api/notes/'+currentId,{ method:'PUT', body: JSON.stringify({ title:titleText, content:content }) })
       .then(function(r){
@@ -588,8 +777,40 @@ const PAGE = `<!doctype html>
         });
       })
       .catch(function(){ $('loginBtn').disabled=false; $('loginErr').textContent='网络错误'; });
+    api('/api/notes').then(function(data){
+      notes=(data||[]).map(function(n){ n.titlePlain=n.title||''; return n; });
+      showApp(); renderList();
+    }).catch(function(){});
+  }
+  function renderList(){
+    if (activeTagFilter!==null) {
+    var list=$('list');
+      var promises=notes.map(function(n){
+        return api('/api/notes/'+n.id+'/tags').then(function(tags){
+          n._tags=tags||[]; return n;
+        }).catch(function(){ n._tags=[]; return n; });
+      });
+      Promise.all(promises).then(function(){
+        var shown=notes.filter(function(n){
+          return n._tags.some(function(t){return t.id===activeTagFilter;});
+        });
+        renderListItems(list, shown, query.trim());
+      });
+    } else {
+    var list=$('list');
+      var q=query.trim();
+      if (q) {
+        api('/api/notes?q='+encodeURIComponent(q)).then(function(data){
+          var shown=(data||[]).map(function(n){ n.titlePlain=n.title||''; return n; });
+          renderListItems(list, shown, q);
+        });
+      } else {
+        renderListItems(list, notes, '');
+      }
+    }
   }
   $('loginBtn').onclick=doLogin;
+  modeBtn.onclick=toggleMode;
   $('pw').addEventListener('keydown', function(e){ if(e.key==='Enter') doLogin(); });
 
   loadNotes();
